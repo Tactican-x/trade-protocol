@@ -1,0 +1,414 @@
+import React, { useState, useRef } from 'react';
+import {
+  View, Text, ScrollView, StyleSheet,
+  TouchableOpacity, TextInput, Alert,
+} from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Picker } from '@react-native-picker/picker';
+import { useRouter } from 'expo-router';
+import { colors, font, spacing, radius, inputStyle } from '../theme';
+import {
+  CheckItem, GroupLabel, PhaseHeader,
+  QuoteBlock, IdentityBlock, WarnBlock,
+  PrimaryButton, GhostButton, Toast,
+} from '../components/UI';
+import { addTrade } from '../store/trades';
+import { format } from 'date-fns';
+
+const BEFORE_MARKET = [
+  'Trend identified (up/down/range)',
+  'Trading with trend or valid setup',
+  'Price at key zone (S/R or supply-demand)',
+];
+const BEFORE_SETUP = [
+  'Clear setup - not guessing',
+  'Confirmation present (rejection, structure break)',
+  'Trade based on system - not feelings',
+];
+const BEFORE_RISK = [
+  'Lot size calculated correctly',
+  'Risk is fixed and defined',
+  'SL placed at a logical level',
+  'TP realistic (minimum 1:2 RR)',
+];
+const BEFORE_MENTAL = [
+  'Was calm before entry',
+  'Okay with losing this trade',
+  'Following plan 100%',
+];
+const DURING_NOT = [
+  'Did not move SL',
+  'Did not move TP',
+  'Did not close early out of fear',
+  'Did not watch every tick emotionally',
+];
+const DURING_DID = [
+  'Let the trade play out fully',
+  'Accepted the outcome',
+  'Stayed calm throughout',
+];
+const AFTER_TRADE = [
+  'Followed my rules',
+  'Entry was valid',
+  'SL was placed correctly',
+  'TP was logical',
+];
+const AFTER_EMOTION = [
+  'Noted any fear or greed',
+  'Did not interfere with the trade',
+  'Identified emotion triggers',
+];
+
+const ALL_RULES_ORDERED = [
+  ...BEFORE_MARKET, ...BEFORE_SETUP, ...BEFORE_RISK, ...BEFORE_MENTAL,
+  ...DURING_NOT, ...DURING_DID, ...AFTER_TRADE, ...AFTER_EMOTION,
+];
+
+const STRATEGIES = [
+  'Supply & Demand', 'Support & Resistance', 'Trend Following',
+  'Breakout', 'Reversal', 'Scalp', 'ICT Order Flow', 'Price Action', 'Other',
+];
+const TIMEFRAMES = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'];
+const SESSIONS = ['London', 'New York', 'Asian', 'Overlap', 'Other'];
+
+type Phase = 0 | 1 | 2 | 3;
+const PHASE_CONFIG = [
+  { label: 'Before', dot: colors.green },
+  { label: 'During', dot: colors.blue },
+  { label: 'After', dot: colors.red },
+  { label: 'Details', dot: colors.amber },
+];
+
+const resultConfig = {
+  win:  { label: 'Win',  bg: colors.green + '33', border: colors.green,  text: colors.green },
+  loss: { label: 'Loss', bg: colors.red   + '33', border: colors.red,    text: colors.red },
+  be:   { label: 'B/E',  bg: colors.amber + '33', border: colors.amber,  text: colors.amber },
+  open: { label: 'Open', bg: colors.blue  + '33', border: colors.blue,   text: colors.blue },
+};
+
+export default function LogTradeScreen() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+
+  const [phase, setPhase] = useState<Phase>(0);
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+  const [pair, setPair] = useState('');
+  const [dir, setDir] = useState<'BUY' | 'SELL'>('BUY');
+  const [entry, setEntry] = useState('');
+  const [lot, setLot] = useState('');
+  const [sl, setSl] = useState('');
+  const [tp, setTp] = useState('');
+  const [pnl, setPnl] = useState('');
+  const [session, setSession] = useState('London');
+  const [strategy, setStrategy] = useState('Supply & Demand');
+  const [timeframe, setTimeframe] = useState('H1');
+  const [result, setResult] = useState<'win' | 'loss' | 'be' | 'open' | null>(null);
+  const [setup, setSetup] = useState('');
+  const [emotions, setEmotions] = useState('');
+  const [mistakes, setMistakes] = useState('');
+  const [lesson, setLesson] = useState('');
+  const [toastMsg, setToastMsg] = useState('');
+  const [toastVisible, setToastVisible] = useState(false);
+  const toastKey = useRef(0);
+
+  function showToast(msg: string) {
+    toastKey.current += 1;
+    setToastMsg(msg);
+    setToastVisible(false);
+    setTimeout(() => setToastVisible(true), 50);
+  }
+
+  function toggle(rule: string) {
+    setChecked((prev) => ({ ...prev, [rule]: !prev[rule] }));
+  }
+
+  const totalTicked = ALL_RULES_ORDERED.filter((r) => checked[r]).length;
+  const progressPct = Math.round((totalTicked / 27) * 100);
+  const beforeTicked = [...BEFORE_MARKET, ...BEFORE_SETUP, ...BEFORE_RISK, ...BEFORE_MENTAL]
+    .filter((r) => checked[r]).length;
+  const showWarn = beforeTicked > 0 && beforeTicked < 13;
+
+  async function handleSave() {
+    if (!pair.trim()) {
+      Alert.alert('Missing Field', 'Please enter a trading pair.');
+      return;
+    }
+    if (!result) {
+      Alert.alert('Missing Field', 'Please select a trade result.');
+      return;
+    }
+    const now = new Date();
+    const followedRules = ALL_RULES_ORDERED.filter((r) => checked[r]);
+    const ruleScore = Math.round((followedRules.length / 27) * 100);
+    await addTrade({
+      id: Date.now(),
+      pair: pair.toUpperCase().trim(),
+      dir, entry, lot, sl, tp,
+      pnl: parseFloat(pnl) || 0,
+      session, result, strategy, timeframe,
+      rules: followedRules,
+      ruleScore, emotions, mistakes, lesson, setup,
+      timestamp: now.toISOString(),
+      dateStr: format(now, 'd MMM yyyy'),
+      timeStr: format(now, 'HH:mm'),
+    });
+    showToast(`Trade logged at ${format(now, 'HH:mm')}`);
+    resetAll();
+    setTimeout(() => router.push('/(tabs)/history'), 800);
+  }
+
+  function resetAll() {
+    setChecked({});
+    setPair(''); setDir('BUY'); setEntry(''); setLot('');
+    setSl(''); setTp(''); setPnl(''); setSession('London');
+    setStrategy('Supply & Demand'); setTimeframe('H1');
+    setResult(null); setSetup(''); setEmotions('');
+    setMistakes(''); setLesson(''); setPhase(0);
+    showToast('Checklist reset');
+  }
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.content, { paddingBottom: 32 }]}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.badge}>
+            <Text style={styles.badgeText}>DISCIPLINE PROTOCOL</Text>
+          </View>
+          <Text style={styles.title}>Trade Entry Ritual</Text>
+          <Text style={styles.subtitle}>Complete each phase before saving</Text>
+        </View>
+
+        {/* Progress Bar */}
+        <View style={styles.progressContainer}>
+          <Text style={styles.progressLabel}>Phase progress</Text>
+          <Text style={styles.progressPct}>{progressPct}%</Text>
+        </View>
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
+        </View>
+
+        {/* Phase Tabs */}
+        <View style={styles.tabsRow}>
+          {PHASE_CONFIG.map((p, i) => {
+            const active = phase === i;
+            return (
+              <TouchableOpacity
+                key={i}
+                onPress={() => setPhase(i as Phase)}
+                style={[styles.tab, active && styles.tabActive]}
+              >
+                <View style={[styles.tabDot, { backgroundColor: p.dot }]} />
+                <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
+                  {p.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {/* Phase Content */}
+        <View style={styles.phaseContent}>
+          {phase === 0 && (
+            <>
+              <PhaseHeader title="PREPARATION PHASE" desc="Enter with clarity, not emotion" color={colors.green} />
+              <GroupLabel color={colors.green}>MARKET CHECK</GroupLabel>
+              {BEFORE_MARKET.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="g" onPress={() => toggle(r)} />)}
+              <GroupLabel color={colors.green}>SETUP CONFIRMATION</GroupLabel>
+              {BEFORE_SETUP.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="g" onPress={() => toggle(r)} />)}
+              <GroupLabel color={colors.green}>RISK CONTROL</GroupLabel>
+              {BEFORE_RISK.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="g" onPress={() => toggle(r)} />)}
+              <GroupLabel color={colors.green}>MENTAL CHECK</GroupLabel>
+              {BEFORE_MENTAL.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="g" onPress={() => toggle(r)} />)}
+              <WarnBlock visible={showWarn} />
+              <IdentityBlock label="IDENTITY SHIFT" quote="I don't chase money. I execute my system." />
+            </>
+          )}
+
+          {phase === 1 && (
+            <>
+              <PhaseHeader title="EXECUTION PHASE" desc="Trust the plan, not your emotions" color={colors.blue} />
+              <GroupLabel color={colors.blue}>I DID NOT</GroupLabel>
+              {DURING_NOT.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="b" onPress={() => toggle(r)} />)}
+              <GroupLabel color={colors.blue}>I DID</GroupLabel>
+              {DURING_DID.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="b" onPress={() => toggle(r)} />)}
+              <QuoteBlock text="I already made the decision. Now I let the market decide." />
+            </>
+          )}
+
+          {phase === 2 && (
+            <>
+              <PhaseHeader title="REVIEW PHASE" desc="Improve process, not chase results" color={colors.red} />
+              <GroupLabel color={colors.red}>TRADE REVIEW</GroupLabel>
+              {AFTER_TRADE.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="r" onPress={() => toggle(r)} />)}
+              <GroupLabel color={colors.red}>EMOTIONAL REVIEW</GroupLabel>
+              {AFTER_EMOTION.map((r) => <CheckItem key={r} label={r} ticked={!!checked[r]} color="r" onPress={() => toggle(r)} />)}
+              <View style={styles.growthSection}>
+                <Text style={styles.growthLabel}>GROWTH LOG</Text>
+                <Text style={styles.fieldLabel}>Emotions during trade</Text>
+                <TextInput value={emotions} onChangeText={setEmotions} placeholder="What did you feel?" placeholderTextColor={colors.muted} multiline numberOfLines={2} style={[inputStyle, styles.textArea]} />
+                <Text style={styles.fieldLabel}>Mistakes made</Text>
+                <TextInput value={mistakes} onChangeText={setMistakes} placeholder="What went wrong?" placeholderTextColor={colors.muted} multiline numberOfLines={2} style={[inputStyle, styles.textArea]} />
+                <Text style={styles.fieldLabel}>Lesson learned</Text>
+                <TextInput value={lesson} onChangeText={setLesson} placeholder="What will you do differently?" placeholderTextColor={colors.muted} multiline numberOfLines={2} style={[inputStyle, styles.textArea]} />
+              </View>
+            </>
+          )}
+
+          {phase === 3 && (
+            <>
+              <PhaseHeader title="TRADE DETAILS" desc="Record the specifics for your log" color={colors.amber} />
+
+              <View style={styles.gridRow}>
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Pair</Text>
+                  <TextInput value={pair} onChangeText={setPair} placeholder="XAUUSD" placeholderTextColor={colors.muted} style={inputStyle} autoCapitalize="characters" />
+                </View>
+                <View style={{ width: spacing.sm }} />
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Direction</Text>
+                  <View style={styles.pickerWrap}>
+                    <Picker selectedValue={dir} onValueChange={(v) => setDir(v as 'BUY' | 'SELL')} style={styles.picker} dropdownIconColor={colors.muted}>
+                      <Picker.Item label="BUY" value="BUY" color={colors.text} />
+                      <Picker.Item label="SELL" value="SELL" color={colors.text} />
+                    </Picker>
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.gridRow}>
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Entry Price</Text>
+                  <TextInput value={entry} onChangeText={setEntry} placeholder="0.00" placeholderTextColor={colors.muted} keyboardType="numeric" style={inputStyle} />
+                </View>
+                <View style={{ width: spacing.sm }} />
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Lot Size</Text>
+                  <TextInput value={lot} onChangeText={setLot} placeholder="0.01" placeholderTextColor={colors.muted} keyboardType="numeric" style={inputStyle} />
+                </View>
+              </View>
+
+              <View style={styles.gridRow}>
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Stop Loss</Text>
+                  <TextInput value={sl} onChangeText={setSl} placeholder="0.00" placeholderTextColor={colors.muted} keyboardType="numeric" style={inputStyle} />
+                </View>
+                <View style={{ width: spacing.sm }} />
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Take Profit</Text>
+                  <TextInput value={tp} onChangeText={setTp} placeholder="0.00" placeholderTextColor={colors.muted} keyboardType="numeric" style={inputStyle} />
+                </View>
+              </View>
+
+              <View style={styles.gridRow}>
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>P&L $</Text>
+                  <TextInput value={pnl} onChangeText={setPnl} placeholder="+0.00" placeholderTextColor={colors.muted} keyboardType="numeric" style={inputStyle} />
+                </View>
+                <View style={{ width: spacing.sm }} />
+                <View style={styles.gridCol}>
+                  <Text style={styles.fieldLabel}>Session</Text>
+                  <View style={styles.pickerWrap}>
+                    <Picker selectedValue={session} onValueChange={setSession} style={styles.picker} dropdownIconColor={colors.muted}>
+                      {SESSIONS.map((s) => <Picker.Item key={s} label={s} value={s} color={colors.text} />)}
+                    </Picker>
+                  </View>
+                </View>
+              </View>
+
+              <Text style={styles.fieldLabel}>Strategy</Text>
+              <View style={styles.pickerWrap}>
+                <Picker selectedValue={strategy} onValueChange={setStrategy} style={styles.picker} dropdownIconColor={colors.muted}>
+                  {STRATEGIES.map((s) => <Picker.Item key={s} label={s} value={s} color={colors.text} />)}
+                </Picker>
+              </View>
+
+              <Text style={styles.fieldLabel}>Timeframe</Text>
+              <View style={styles.pickerWrap}>
+                <Picker selectedValue={timeframe} onValueChange={setTimeframe} style={styles.picker} dropdownIconColor={colors.muted}>
+                  {TIMEFRAMES.map((t) => <Picker.Item key={t} label={t} value={t} color={colors.text} />)}
+                </Picker>
+              </View>
+
+              <Text style={styles.fieldLabel}>Result</Text>
+              <View style={styles.resultRow}>
+                {(Object.entries(resultConfig) as [string, typeof resultConfig.win][]).map(([key, cfg]) => {
+                  const active = result === key;
+                  return (
+                    <TouchableOpacity
+                      key={key}
+                      onPress={() => setResult(key as any)}
+                      style={[styles.resultPill, { backgroundColor: active ? cfg.bg : 'transparent', borderColor: active ? cfg.border : colors.border }]}
+                    >
+                      <Text style={[styles.resultPillText, { color: active ? cfg.text : colors.muted }]}>{cfg.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.fieldLabel}>SETUP NOTES</Text>
+              <TextInput value={setup} onChangeText={setSetup} placeholder="Describe your setup..." placeholderTextColor={colors.muted} multiline numberOfLines={3} style={[inputStyle, styles.textArea]} />
+            </>
+          )}
+        </View>
+
+        {/* Buttons */}
+        <View style={styles.buttons}>
+          <PrimaryButton label="Save Trade Log" onPress={handleSave} />
+          <View style={{ height: spacing.sm }} />
+          <GhostButton label="Reset Checklist" onPress={resetAll} />
+        </View>
+      </ScrollView>
+
+      <Toast message={toastMsg} visible={toastVisible} />
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.bg },
+  scroll: { flex: 1 },
+  content: { padding: spacing.lg },
+  header: { alignItems: 'center', marginBottom: spacing.lg },
+  badge: {
+    backgroundColor: colors.green + '22',
+    borderWidth: 1,
+    borderColor: colors.green + '55',
+    borderRadius: radius.pill,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    marginBottom: spacing.sm,
+  },
+  badgeText: { fontFamily: font.mono, fontSize: 9, color: colors.green, letterSpacing: 1.5 },
+  title: { color: colors.text, fontSize: 24, fontWeight: '800', letterSpacing: 0.3, marginBottom: 6 },
+  subtitle: { fontFamily: font.mono, fontSize: 11, color: colors.muted, textAlign: 'center' },
+  progressContainer: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  progressLabel: { fontFamily: font.mono, fontSize: 10, color: colors.muted },
+  progressPct: { fontFamily: font.mono, fontSize: 10, color: colors.green },
+  progressTrack: { height: 4, backgroundColor: colors.surface2, borderRadius: 2, marginBottom: spacing.lg, overflow: 'hidden' },
+  progressFill: { height: '100%', backgroundColor: colors.green, borderRadius: 2 },
+  tabsRow: { flexDirection: 'row', marginBottom: spacing.lg, gap: spacing.xs },
+  tab: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: radius.pill, borderWidth: 0.5, borderColor: 'transparent', gap: 4 },
+  tabActive: { backgroundColor: colors.surface2, borderColor: colors.border2 },
+  tabDot: { width: 6, height: 6, borderRadius: 3 },
+  tabLabel: { fontFamily: font.mono, fontSize: 10, color: colors.muted },
+  tabLabelActive: { color: colors.text },
+  phaseContent: { marginBottom: spacing.lg },
+  growthSection: { marginTop: spacing.lg },
+  growthLabel: { fontFamily: font.mono, fontSize: 10, color: colors.muted, letterSpacing: 1.5, marginBottom: spacing.sm },
+  fieldLabel: { fontFamily: font.mono, fontSize: 10, color: colors.muted, letterSpacing: 1, marginBottom: 4, marginTop: spacing.sm },
+  textArea: { textAlignVertical: 'top', minHeight: 60 },
+  gridRow: { flexDirection: 'row', marginBottom: 4 },
+  gridCol: { flex: 1 },
+  pickerWrap: { backgroundColor: colors.surface2, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.sm, overflow: 'hidden' },
+  picker: { color: colors.text, height: 44, fontSize: 13 },
+  resultRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
+  resultPill: { flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1, alignItems: 'center' },
+  resultPillText: { fontFamily: font.mono, fontSize: 11, fontWeight: '700' },
+  buttons: { marginTop: spacing.sm },
+});

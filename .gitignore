@@ -39,3 +39,15 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Additional exclusions
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# Build outputs
+build/

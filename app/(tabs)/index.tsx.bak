@@ -1,0 +1,1028 @@
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  TouchableOpacity,
+  RefreshControl,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect, useRouter } from 'expo-router';
+import * as Haptics from 'expo-haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { loadTrades, calcStats, exportTrades, Trade } from '../store/trades';
+import { colors, font, spacing, radius } from '../theme';
+import { TradeCard } from '../components/TradeCard';
+import { Toast } from '../components/UI';
+import { ViolationWidget } from '../components/ViolationWidget';
+import { getTopViolations, RuleViolation } from '../store/interventionEngine';
+
+const LAST_STREAK_KEY = '@last_celebrated_streak';
+
+// ── Greeting ─────────────────────────────────────────────────────────────────
+function getGreeting(): { greeting: string; emoji: string } {
+  const h = new Date().getHours();
+  if (h < 5)  return { greeting: 'Burning the midnight oil', emoji: '🌙' };
+  if (h < 12) return { greeting: 'Good morning',              emoji: '☀️' };
+  if (h < 17) return { greeting: 'Good afternoon',            emoji: '👋' };
+  if (h < 21) return { greeting: 'Good evening',              emoji: '🌆' };
+  return        { greeting: 'Late session',                   emoji: '🌙' };
+}
+
+// ── Format helpers ────────────────────────────────────────────────────────────
+const fmtPnl = (n: number, compact = false) => {
+  const abs = Math.abs(n);
+  const sign = n >= 0 ? '+' : '-';
+  if (compact) return `${sign}$${abs.toFixed(0)}`;
+  return `${sign}$${abs.toFixed(2)}`;
+};
+
+// ── Section Divider ───────────────────────────────────────────────────────────
+function SectionDivider({ label }: { label: string }) {
+  return (
+    <View style={divStyles.row}>
+      <View style={divStyles.line} />
+      <Text style={divStyles.label}>{label}</Text>
+      <View style={divStyles.line} />
+    </View>
+  );
+}
+const divStyles = StyleSheet.create({
+  row:   { flexDirection: 'row', alignItems: 'center', marginVertical: spacing.md },
+  line:  { flex: 1, height: 0.5, backgroundColor: colors.border },
+  label: { fontFamily: font.mono, fontSize: 9, color: colors.muted, letterSpacing: 1.5, marginHorizontal: spacing.sm },
+});
+
+// ── Hero Stat ─────────────────────────────────────────────────────────────────
+function HeroStat({
+  icon, label, value, color, sub, empty,
+}: {
+  icon:  string;
+  label: string;
+  value: string | number;
+  color: string;
+  sub?:  string;
+  empty?: boolean;
+}) {
+  return (
+    <View
+      style={heroStyles.card}
+      accessible
+      accessibilityRole="text"
+      accessibilityLabel={`${label}: ${empty ? 'no data yet' : value}${sub ? `, ${sub}` : ''}`}
+    >
+      <View style={heroStyles.topRow}>
+        <View style={[heroStyles.iconBg, { backgroundColor: color + '18' }]}>
+          <Ionicons name={icon as any} size={16} color={color} />
+        </View>
+        <Text style={heroStyles.label}>{label}</Text>
+      </View>
+      <Text style={[heroStyles.value, { color: empty ? colors.muted : color }]}>
+        {empty ? '—' : value}
+      </Text>
+      {sub && <Text style={heroStyles.sub}>{sub}</Text>}
+    </View>
+  );
+}
+const heroStyles = StyleSheet.create({
+  card: {
+    flex:            1,
+    backgroundColor: colors.surface,
+    borderWidth:     0.5,
+    borderColor:     colors.border,
+    borderRadius:    radius.lg,
+    padding:         spacing.md,
+    justifyContent:  'space-between',
+    minHeight:       120,
+  },
+  topRow:  { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: spacing.sm },
+  iconBg:  { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  label:   { fontFamily: font.mono, fontSize: 8, color: colors.muted, letterSpacing: 1.5, flex: 1 },
+  value:   { fontFamily: font.mono, fontSize: 26, fontWeight: '800', letterSpacing: 0.5 },
+  sub:     { fontFamily: font.mono, fontSize: 9, color: colors.muted, marginTop: 2 },
+});
+
+// ── Discipline Progress ───────────────────────────────
+function DisciplineProgress({ score, color }: { score: number; color: string }) {
+  const segments = 10;
+  const filled   = Math.round((score / 100) * segments);
+  return (
+    <View style={discStyles.container}>
+      <Text style={[discStyles.score, { color }]}>{score}%</Text>
+      <View style={discStyles.segmentRow}>
+        {Array.from({ length: segments }).map((_, i) => (
+          <View
+            key={i}
+            style={[
+              discStyles.segment,
+              { backgroundColor: i < filled ? color : colors.surface2 },
+            ]}
+          />
+        ))}
+      </View>
+      <Text style={discStyles.label}>
+        {score >= 80 ? 'EXCELLENT' : score >= 60 ? 'GOOD' : score >= 40 ? 'NEEDS WORK' : 'CRITICAL'}
+      </Text>
+    </View>
+  );
+}
+const discStyles = StyleSheet.create({
+  container:  { alignItems: 'center', gap: 8 },
+  score:      { fontFamily: font.mono, fontSize: 24, fontWeight: '800', letterSpacing: 0.5 },
+  segmentRow: { flexDirection: 'row', gap: 3, width: '100%' },
+  segment:    { flex: 1, height: 5, borderRadius: 2 },
+  label:      { fontFamily: font.mono, fontSize: 8, color: colors.muted, letterSpacing: 1.5 },
+});
+
+// ── P&L Chart ─────────────────────────────────────────────────────────────────
+function PnlChart({ trades }: { trades: Trade[] }) {
+  const last10   = trades.slice(0, 10).reverse();
+  const maxAbs   = Math.max(...last10.map((t) => Math.abs(t.pnl)), 1);
+  const totalPnl = last10.reduce((s, t) => s + t.pnl, 0);
+  const pnlColor = totalPnl > 0 ? colors.green : totalPnl < 0 ? colors.red : colors.muted;
+
+  if (last10.length === 0) {
+    return (
+      <View style={chartStyles.card}>
+        <View style={chartStyles.header}>
+          <View style={chartStyles.headerLeft}>
+            <View style={[chartStyles.iconBg, { backgroundColor: colors.green + '18' }]}>
+              <Ionicons name="bar-chart" size={14} color={colors.green} />
+            </View>
+            <Text style={chartStyles.title}>P&L PERFORMANCE</Text>
+          </View>
+        </View>
+        <View style={chartStyles.emptyBox}>
+          <Ionicons name="trending-up-outline" size={32} color={colors.muted} />
+          <Text style={chartStyles.empty}>No trades yet — your performance will appear here</Text>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={chartStyles.card}>
+      <View style={chartStyles.header}>
+        <View style={chartStyles.headerLeft}>
+          <View style={[chartStyles.iconBg, { backgroundColor: colors.green + '18' }]}>
+            <Ionicons name="bar-chart" size={14} color={colors.green} />
+          </View>
+          <Text style={chartStyles.title}>P&L PERFORMANCE</Text>
+        </View>
+        <View style={chartStyles.totalBadge}>
+          <Text style={[chartStyles.totalText, { color: pnlColor }]}>
+            {fmtPnl(totalPnl, true)}
+          </Text>
+        </View>
+      </View>
+
+      <View style={chartStyles.chartArea}>
+        {last10.map((t, i) => {
+          const barH     = Math.max(4, (Math.abs(t.pnl) / maxAbs) * 70);
+          const barColor = t.pnl > 0 ? colors.green : t.pnl < 0 ? colors.red : colors.amber;
+          const isZero   = t.pnl === 0;
+          return (
+            <View key={`${t.id}-${i}`} style={chartStyles.barCol}>
+              <View style={chartStyles.barHalf}>
+                {t.pnl > 0 && (
+                  <View style={{ flex: 1, justifyContent: 'flex-end', alignItems: 'center' }}>
+                    <View style={[chartStyles.bar, { height: barH, backgroundColor: barColor }]} />
+                  </View>
+                )}
+              </View>
+              <View style={chartStyles.zeroLine}>
+                {isZero && <View style={[chartStyles.zeroDot, { backgroundColor: colors.amber }]} />}
+              </View>
+              <View style={chartStyles.barHalf}>
+                {t.pnl < 0 && (
+                  <View style={{ flex: 1, justifyContent: 'flex-start', alignItems: 'center' }}>
+                    <View style={[chartStyles.bar, { height: barH, backgroundColor: barColor }]} />
+                  </View>
+                )}
+              </View>
+              <Text style={chartStyles.barLabel}>{i + 1}</Text>
+            </View>
+          );
+        })}
+      </View>
+
+      <View style={chartStyles.legend}>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: colors.green }]} />
+          <Text style={chartStyles.legendText}>Profit</Text>
+        </View>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: colors.red }]} />
+          <Text style={chartStyles.legendText}>Loss</Text>
+        </View>
+        <Text style={chartStyles.legendRight}>Last {last10.length} · oldest → newest</Text>
+      </View>
+    </View>
+  );
+}
+const chartStyles = StyleSheet.create({
+  card:        { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
+  header:      { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md },
+  headerLeft:  { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  iconBg:      { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  title:       { fontFamily: font.mono, fontSize: 9, color: colors.muted, letterSpacing: 1.5 },
+  totalBadge:  { backgroundColor: colors.surface2, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 3 },
+  totalText:   { fontFamily: font.mono, fontSize: 11, fontWeight: '700' },
+  chartArea:   { flexDirection: 'row', height: 160, gap: 2 },
+  barCol:      { flex: 1, alignItems: 'center' },
+  barHalf:     { flex: 1, width: '100%' },
+  zeroLine:    { height: 0.5, width: '100%', backgroundColor: colors.border2, alignItems: 'center', justifyContent: 'center' },
+  zeroDot:     { position: 'absolute', width: 6, height: 6, borderRadius: 3 },
+  bar:         { width: '60%', borderRadius: 3, minHeight: 4 },
+  barLabel:    { fontFamily: font.mono, fontSize: 7, color: colors.muted, marginTop: 4 },
+  legend:      { flexDirection: 'row', alignItems: 'center', marginTop: spacing.sm, gap: spacing.md },
+  legendItem:  { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  legendDot:   { width: 6, height: 6, borderRadius: 3 },
+  legendText:  { fontFamily: font.mono, fontSize: 9, color: colors.muted },
+  legendRight: { fontFamily: font.mono, fontSize: 9, color: colors.muted, marginLeft: 'auto' },
+  emptyBox:    { paddingVertical: spacing.xl, alignItems: 'center', gap: spacing.sm },
+  empty:       { fontFamily: font.mono, fontSize: 11, color: colors.muted, textAlign: 'center', paddingHorizontal: spacing.lg },
+});
+
+// ── Streak Tracker ────────────────────────────────────────────────────────────
+function StreakTracker({
+  maxWin, maxLoss, curWin,
+}: {
+  maxWin: number; maxLoss: number; curWin: number;
+}) {
+  return (
+    <View style={streakStyles.card}>
+      <View style={streakStyles.header}>
+        <View style={[streakStyles.iconBg, { backgroundColor: colors.purple + '18' }]}>
+          <Ionicons name="flame" size={14} color={colors.purple} />
+        </View>
+        <Text style={streakStyles.title}>STREAK TRACKER</Text>
+      </View>
+      <View style={streakStyles.row}>
+        <StreakBox label="Best Run"    value={maxWin}  color={colors.green} icon="trophy" />
+        <View style={streakStyles.divider} />
+        <StreakBox label="Worst Run"   value={maxLoss} color={colors.red}   icon="alert-circle" />
+        <View style={streakStyles.divider} />
+        <StreakBox label="Active"      value={curWin}  color={colors.blue}  icon="flash" />
+      </View>
+    </View>
+  );
+}
+function StreakBox({
+  label, value, color, icon,
+}: {
+  label: string; value: number; color: string; icon: string;
+}) {
+  return (
+    <View style={streakStyles.box}>
+      <View style={[streakStyles.boxIconBg, { backgroundColor: color + '15' }]}>
+        <Ionicons name={icon as any} size={14} color={color} />
+      </View>
+      <Text style={[streakStyles.num, { color }]}>{value}</Text>
+      <Text style={streakStyles.boxLabel}>{label}</Text>
+    </View>
+  );
+}
+const streakStyles = StyleSheet.create({
+  card:        { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
+  header:      { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: spacing.md },
+  iconBg:      { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  title:       { fontFamily: font.mono, fontSize: 9, color: colors.muted, letterSpacing: 1.5 },
+  row:         { flexDirection: 'row', alignItems: 'center' },
+  divider:     { width: 0.5, alignSelf: 'stretch', backgroundColor: colors.border, marginHorizontal: spacing.sm },
+  box:         { flex: 1, alignItems: 'center', gap: 4 },
+  boxIconBg:   { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
+  num:         { fontFamily: font.mono, fontSize: 28, fontWeight: '800', lineHeight: 32 },
+  boxLabel:    { fontFamily: font.mono, fontSize: 8, color: colors.muted, letterSpacing: 1, textTransform: 'uppercase' },
+});
+
+// ── Session Breakdown ─────────────────────────────────────────────────────────
+function SessionBreakdown({ trades }: { trades: Trade[] }) {
+  const sessions = ['London', 'New York', 'Asian', 'Overlap'];
+  const data = sessions.map((s) => {
+    const st    = trades.filter((t) => t.session === s);
+    const wins  = st.filter((t) => t.result === 'win').length;
+    const total = st.filter((t) => t.result === 'win' || t.result === 'loss').length;
+    const pnl   = st.reduce((sum, t) => sum + t.pnl, 0);
+    return {
+      session: s,
+      count:   st.length,
+      winRate: total > 0 ? Math.round((wins / total) * 100) : 0,
+      pnl,
+    };
+  }).filter((d) => d.count > 0);
+
+  if (data.length === 0) return null;
+  const maxCount = Math.max(...data.map((d) => d.count), 1);
+
+  return (
+    <View style={sessionStyles.card}>
+      <View style={sessionStyles.header}>
+        <View style={[sessionStyles.iconBg, { backgroundColor: colors.amber + '18' }]}>
+          <Ionicons name="globe" size={14} color={colors.amber} />
+        </View>
+        <Text style={sessionStyles.title}>SESSION BREAKDOWN</Text>
+      </View>
+      {data.map((d) => {
+        const barW     = Math.max(8, (d.count / maxCount) * 100);
+        const pnlColor = d.pnl > 0 ? colors.green : d.pnl < 0 ? colors.red : colors.muted;
+        return (
+          <View key={d.session} style={sessionStyles.row}>
+            <Text style={sessionStyles.sessionName}>{d.session}</Text>
+            <View style={sessionStyles.barBg}>
+              <View
+                style={[
+                  sessionStyles.barFill,
+                  {
+                    width:           `${barW}%`,
+                    backgroundColor: d.winRate >= 50 ? colors.green + '55' : colors.red + '55',
+                  },
+                ]}
+              />
+            </View>
+            <Text style={sessionStyles.count}>{d.count}</Text>
+            <Text style={[sessionStyles.winRate, { color: d.winRate >= 50 ? colors.green : colors.red }]}>
+              {d.winRate}%
+            </Text>
+            <Text style={[sessionStyles.pnl, { color: pnlColor }]}>
+              {d.pnl >= 0 ? '+' : ''}{d.pnl.toFixed(0)}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+const sessionStyles = StyleSheet.create({
+  card:        { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
+  header:      { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: spacing.md },
+  iconBg:      { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  title:       { fontFamily: font.mono, fontSize: 9, color: colors.muted, letterSpacing: 1.5 },
+  row:         { flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 6 },
+  sessionName: { fontFamily: font.mono, fontSize: 10, color: colors.text, width: 60, fontWeight: '600' },
+  barBg:       { flex: 1, height: 6, backgroundColor: colors.surface2, borderRadius: 3, overflow: 'hidden' },
+  barFill:     { height: 6, borderRadius: 3 },
+  count:       { fontFamily: font.mono, fontSize: 10, color: colors.muted, width: 20, textAlign: 'right' },
+  winRate:     { fontFamily: font.mono, fontSize: 10, fontWeight: '700', width: 30, textAlign: 'right' },
+  pnl:         { fontFamily: font.mono, fontSize: 10, fontWeight: '600', width: 40, textAlign: 'right' },
+});
+
+// ── Period Summary ────────────────────────────────────────────────────────────
+function PeriodSummary({
+  weekPnl, weekTrades, weekWinRate,
+  monthPnl, monthTrades, monthWinRate,
+}: {
+  weekPnl:  number; weekTrades:  number; weekWinRate:  number;
+  monthPnl: number; monthTrades: number; monthWinRate: number;
+}) {
+  const wColor = weekPnl  > 0 ? colors.green : weekPnl  < 0 ? colors.red : colors.muted;
+  const mColor = monthPnl > 0 ? colors.green : monthPnl < 0 ? colors.red : colors.muted;
+
+  return (
+    <View style={periodStyles.card}>
+      <View style={periodStyles.header}>
+        <View style={[periodStyles.iconBg, { backgroundColor: colors.blue + '18' }]}>
+          <Ionicons name="calendar" size={14} color={colors.blue} />
+        </View>
+        <Text style={periodStyles.title}>PERIOD SUMMARY</Text>
+      </View>
+      <View style={periodStyles.row}>
+        <View style={periodStyles.col}>
+          <Text style={periodStyles.colTitle}>THIS WEEK</Text>
+          <Text style={[periodStyles.colPnl, { color: wColor }]}>
+            {weekTrades === 0 ? '—' : fmtPnl(weekPnl, true)}
+          </Text>
+          <Text style={periodStyles.colSub}>
+            {weekTrades === 0 ? 'No trades yet' : `${weekTrades} trades · ${weekWinRate}% WR`}
+          </Text>
+        </View>
+        <View style={periodStyles.divider} />
+        <View style={periodStyles.col}>
+          <Text style={periodStyles.colTitle}>THIS MONTH</Text>
+          <Text style={[periodStyles.colPnl, { color: mColor }]}>
+            {monthTrades === 0 ? '—' : fmtPnl(monthPnl, true)}
+          </Text>
+          <Text style={periodStyles.colSub}>
+            {monthTrades === 0 ? 'No trades yet' : `${monthTrades} trades · ${monthWinRate}% WR`}
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+const periodStyles = StyleSheet.create({
+  card:     { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
+  header:   { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: spacing.md },
+  iconBg:   { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  title:    { fontFamily: font.mono, fontSize: 9, color: colors.muted, letterSpacing: 1.5 },
+  row:      { flexDirection: 'row' },
+  col:      { flex: 1, alignItems: 'center', padding: spacing.sm },
+  colTitle: { fontFamily: font.mono, fontSize: 8, color: colors.muted, letterSpacing: 1.5, marginBottom: 6 },
+  colPnl:   { fontFamily: font.mono, fontSize: 24, fontWeight: '800', marginBottom: 4 },
+  colSub:   { fontFamily: font.mono, fontSize: 9, color: colors.muted, textAlign: 'center' },
+  divider:  { width: 0.5, backgroundColor: colors.border, alignSelf: 'stretch', marginHorizontal: spacing.sm },
+});
+
+// ── Best / Worst Trade ────────────────────────────────────────────────────────
+function BestWorstTrades({
+  best, worst, onPress,
+}: {
+  best: Trade | null; worst: Trade | null; onPress: (id: number) => void;
+}) {
+  if (!best && !worst) return null;
+
+  return (
+    <View style={bwStyles.card}>
+      <View style={bwStyles.header}>
+        <View style={[bwStyles.iconBg, { backgroundColor: colors.purple + '18' }]}>
+          <Ionicons name="podium" size={14} color={colors.purple} />
+        </View>
+        <Text style={bwStyles.title}>BEST & WORST TRADES</Text>
+      </View>
+
+      {best && (
+        <TouchableOpacity
+          onPress={() => { Haptics.selectionAsync(); onPress(best.id); }}
+          style={[bwStyles.row, !worst && { borderBottomWidth: 0 }]}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel={`Best trade: ${best.pair} ${best.dir}, profit ${best.pnl.toFixed(2)} dollars`}
+        >
+          <View style={[bwStyles.badge, { backgroundColor: colors.green + '18', borderColor: colors.green + '55' }]}>
+            <Ionicons name="trophy" size={12} color={colors.green} />
+          </View>
+          <View style={bwStyles.info}>
+            <Text style={bwStyles.pair}>{best.pair} {best.dir}</Text>
+            <Text style={bwStyles.meta}>{best.dateStr} · {best.strategy}</Text>
+          </View>
+          <Text style={[bwStyles.pnl, { color: colors.green }]}>{fmtPnl(best.pnl)}</Text>
+          <Ionicons name="chevron-forward" size={14} color={colors.muted} />
+        </TouchableOpacity>
+      )}
+
+      {worst && (
+        <TouchableOpacity
+          onPress={() => { Haptics.selectionAsync(); onPress(worst.id); }}
+          style={[bwStyles.row, bwStyles.lastRow]}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel={`Worst trade: ${worst.pair} ${worst.dir}, loss ${Math.abs(worst.pnl).toFixed(2)} dollars`}
+        >
+          <View style={[bwStyles.badge, { backgroundColor: colors.red + '18', borderColor: colors.red + '55' }]}>
+            <Ionicons name="alert-circle" size={12} color={colors.red} />
+          </View>
+          <View style={bwStyles.info}>
+            <Text style={bwStyles.pair}>{worst.pair} {worst.dir}</Text>
+            <Text style={bwStyles.meta}>{worst.dateStr} · {worst.strategy}</Text>
+          </View>
+          <Text style={[bwStyles.pnl, { color: colors.red }]}>{fmtPnl(worst.pnl)}</Text>
+          <Ionicons name="chevron-forward" size={14} color={colors.muted} />
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+const bwStyles = StyleSheet.create({
+  card:    { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
+  header:  { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: spacing.md },
+  iconBg:  { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  title:   { fontFamily: font.mono, fontSize: 9, color: colors.muted, letterSpacing: 1.5 },
+  row:     { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.sm, borderBottomWidth: 0.5, borderBottomColor: colors.border },
+  lastRow: { borderBottomWidth: 0 },
+  badge:   { width: 28, height: 28, borderRadius: 8, borderWidth: 0.5, alignItems: 'center', justifyContent: 'center' },
+  info:    { flex: 1 },
+  pair:    { color: colors.text, fontSize: 13, fontWeight: '700', fontFamily: font.mono },
+  meta:    { fontFamily: font.mono, fontSize: 9, color: colors.muted, marginTop: 2 },
+  pnl:     { fontFamily: font.mono, fontSize: 14, fontWeight: '800' },
+});
+
+// ── Quick Actions Grid ────────────────────────────────────────────────────────
+function QuickActions({
+  onLogTrade, onHistory, onRules,
+}: {
+  onLogTrade: () => void;
+  onHistory:  () => void;
+  onRules:    () => void;
+}) {
+  return (
+    <View style={qaStyles.container}>
+      {/* Primary CTA */}
+      <TouchableOpacity
+        onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onLogTrade(); }}
+        activeOpacity={0.8}
+        style={qaStyles.primaryBtn}
+        accessibilityRole="button"
+        accessibilityLabel="Log a new trade"
+      >
+        <View style={qaStyles.iconBg}>
+          <Ionicons name="add" size={20} color={colors.bg} />
+        </View>
+        <View style={qaStyles.textCol}>
+          <Text style={qaStyles.primaryTitle}>Log New Trade</Text>
+          <Text style={qaStyles.primarySub}>Record your next entry ritual</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={16} color={colors.green} />
+      </TouchableOpacity>
+
+      {/* Secondary actions */}
+      <View style={qaStyles.secondaryRow}>
+        <TouchableOpacity
+          onPress={() => { Haptics.selectionAsync(); onHistory(); }}
+          activeOpacity={0.7}
+          style={qaStyles.secondaryBtn}
+          accessibilityRole="button"
+          accessibilityLabel="View trade history"
+        >
+          <Ionicons name="time-outline" size={16} color={colors.blue} />
+          <Text style={[qaStyles.secondaryText, { color: colors.blue }]}>History</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => { Haptics.selectionAsync(); onRules(); }}
+          activeOpacity={0.7}
+          style={qaStyles.secondaryBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Review trading rules"
+        >
+          <Ionicons name="shield-checkmark-outline" size={16} color={colors.purple} />
+          <Text style={[qaStyles.secondaryText, { color: colors.purple }]}>Rules</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+const qaStyles = StyleSheet.create({
+  container:    { marginBottom: spacing.md },
+  primaryBtn:   { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.green + '12', borderWidth: 0.5, borderColor: colors.green + '44', borderRadius: radius.lg, padding: spacing.md, gap: spacing.md, marginBottom: spacing.sm },
+  iconBg:       { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.green, alignItems: 'center', justifyContent: 'center' },
+  textCol:      { flex: 1 },
+  primaryTitle: { color: colors.green, fontSize: 14, fontWeight: '700' },
+  primarySub:   { fontFamily: font.mono, fontSize: 10, color: colors.muted, marginTop: 2 },
+  secondaryRow: { flexDirection: 'row', gap: spacing.sm },
+  secondaryBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, paddingVertical: 10 },
+  secondaryText:{ fontFamily: font.mono, fontSize: 11, fontWeight: '700' },
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── MAIN DASHBOARD ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+export default function DashboardScreen() {
+  const [trades, setTrades]             = useState<Trade[]>([]);
+  const [violations, setViolations]     = useState<RuleViolation[]>([]);
+  const [exporting, setExporting]       = useState(false);
+  const [loading, setLoading]           = useState(true);
+  const [refreshing, setRefreshing]     = useState(false);
+  const [toastMsg, setToastMsg]         = useState('');
+  const [toastVisible, setToastVisible] = useState(false);
+  
+  // Account settings state
+  const [profile, setProfile]           = useState({ name: '', balance: 10000 });
+  const lastStreakRef                   = useRef<number | null>(null);
+  const router                          = useRouter();
+  const { greeting, emoji }             = getGreeting();
+
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    setToastVisible(false);
+    setTimeout(() => setToastVisible(true), 50);
+  };
+
+  // ── Load last celebrated streak from storage on mount ──────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem(LAST_STREAK_KEY);
+        lastStreakRef.current = stored ? parseInt(stored, 10) : 0;
+      } catch {
+        lastStreakRef.current = 0;
+      }
+    })();
+  }, []);
+
+  // ── Fetch + streak detection ───────────────────────────────────────────
+  const fetchData = useCallback(async (isRefresh = false) => {
+    if (!isRefresh) setLoading(true);
+    try {
+      // NEW: Fetch Profile Name and Balance
+      const pName = await AsyncStorage.getItem('@user_name');
+      const pBal  = await AsyncStorage.getItem('@start_balance');
+      setProfile({ name: pName || '', balance: pBal ? parseFloat(pBal) : 10000 });
+
+      const t = await loadTrades();
+      setTrades(t);
+      setViolations(getTopViolations(t));
+
+      const s = calcStats(t);
+      const lastCelebrated = lastStreakRef.current ?? 0;
+      const milestones     = [3, 5, 10, 20, 50];
+      const isMilestone    = milestones.includes(s.curWin) || (s.curWin > 0 && s.curWin % 25 === 0);
+
+      if (s.curWin > lastCelebrated && isMilestone) {
+        lastStreakRef.current = s.curWin;
+        await AsyncStorage.setItem(LAST_STREAK_KEY, String(s.curWin));
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        showToast(`🔥 ${s.curWin} win streak! Stay disciplined.`);
+      } else if (s.curWin < lastCelebrated) {
+        // Streak broken — reset baseline
+        lastStreakRef.current = s.curWin;
+        await AsyncStorage.setItem(LAST_STREAK_KEY, String(s.curWin));
+      }
+    } catch {
+      showToast('Failed to load trades');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchData(false);
+    }, [fetchData])
+  );
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    await fetchData(true);
+  }, [fetchData]);
+
+  // ── Stats Calculations ──
+  const stats           = calcStats(trades);
+  
+  // NEW: Equity Calculations
+  const startingBalance = profile.balance || 10000;
+  const currentEquity   = startingBalance + stats.totalPnl;
+  const roiPct          = startingBalance > 0 ? (stats.totalPnl / startingBalance) * 100 : 0;
+  const roiStr          = roiPct >= 0 ? `+${roiPct.toFixed(2)}%` : `${roiPct.toFixed(2)}%`;
+  
+  const recent          = trades.slice(0, 5);
+  const closedCount     = trades.filter((t) => t.result === 'win' || t.result === 'loss').length;
+  const hasTrades       = trades.length > 0;
+
+  const pnlColor     = stats.totalPnl > 0 ? colors.green : stats.totalPnl < 0 ? colors.red : colors.muted;
+  const winRateColor = stats.winRate >= 50 ? colors.green : colors.red;
+  const discColor    = stats.avgDiscipline >= 80 ? colors.green : stats.avgDiscipline >= 60 ? colors.amber : colors.red;
+
+  const todayTrades = trades.filter((t) => {
+    const d   = new Date(t.timestamp);
+    const now = new Date();
+    return (
+      d.getDate()     === now.getDate()     &&
+      d.getMonth()    === now.getMonth()    &&
+      d.getFullYear() === now.getFullYear()
+    );
+  });
+
+  const handleExport = async () => {
+    try {
+      setExporting(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await exportTrades();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      showToast('✓ Backup exported successfully');
+    } catch (e: any) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      showToast('Failed to export backup');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const navigateToTrade = (id: number) => {
+    router.push({
+      pathname: '/screens/TradeDetailScreen',
+      params:   { id: String(id) },
+    });
+  };
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.green}
+            colors={[colors.green]}
+            progressBackgroundColor={colors.surface}
+          />
+        }
+      >
+        {/* ── Loading skeleton ───────────────────────────────────────── */}
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <View style={styles.skeletonHeader} />
+            <View style={styles.skeletonRow}>
+              <View style={styles.skeletonCard} />
+              <View style={styles.skeletonCard} />
+            </View>
+            <View style={styles.skeletonRow}>
+              <View style={styles.skeletonCard} />
+              <View style={styles.skeletonCard} />
+            </View>
+            <View style={styles.skeletonFull} />
+            <View style={styles.skeletonFull} />
+          </View>
+        )}
+
+        {!loading && (
+          <>
+            {/* ── Header ─────────────────────────────────────────────── */}
+            <View style={styles.header}>
+              <View style={styles.headerLeft}>
+                <View style={styles.headerBadge}>
+                  <Text style={styles.headerBadgeText}>TRADING PSYCHOLOGY OS</Text>
+                </View>
+                <Text style={styles.greeting}>
+                  {greeting}{profile.name ? `, ${profile.name}` : ''} {emoji}
+                </Text>
+                <Text style={styles.headerTitle}>Discipline Protocol</Text>
+              </View>
+              <View style={styles.headerRight}>
+                <View style={styles.todayBadge}>
+                  <Text style={styles.todayNum}>{todayTrades.length}</Text>
+                  <Text style={styles.todayLabel}>TODAY</Text>
+                </View>
+              </View>
+            </View>
+
+            {/* ── Account Equity Banner ──────────────────────────────── */}
+            <View style={equityStyles.card}>
+              <View style={equityStyles.left}>
+                <Text style={equityStyles.label}>CURRENT ACCOUNT EQUITY</Text>
+                <Text style={equityStyles.equityValue}>
+                  ${currentEquity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </Text>
+              </View>
+              <View style={equityStyles.right}>
+                <View style={[equityStyles.pnlBadge, { backgroundColor: pnlColor + '18', borderColor: pnlColor + '44' }]}>
+                  <Ionicons name={stats.totalPnl >= 0 ? "trending-up" : "trending-down"} size={12} color={pnlColor} />
+                  <Text style={[equityStyles.pnlText, { color: pnlColor }]}>
+                    {stats.totalPnl >= 0 ? '+' : ''}${Math.abs(stats.totalPnl).toFixed(2)} ({roiStr})
+                  </Text>
+                </View>
+                <Text style={equityStyles.startSub}>Started: ${startingBalance.toLocaleString()}</Text>
+              </View>
+            </View>
+
+            {/* ── Export ─────────────────────────────────────────────── */}
+            {hasTrades && (
+              <TouchableOpacity
+                onPress={handleExport}
+                disabled={exporting}
+                style={[styles.exportBtn, exporting && { opacity: 0.5 }]}
+                activeOpacity={0.8}
+                accessibilityRole="button"
+                accessibilityLabel={`Backup ${trades.length} trades`}
+              >
+                <Ionicons name="cloud-download-outline" size={16} color={colors.blue} />
+                <Text style={styles.exportBtnText}>
+                  {exporting ? 'Exporting...' : 'Backup All Trades'}
+                </Text>
+                <Text style={styles.exportCount}>{trades.length} trades</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* ── Quick Actions ─────────────────────────────────────── */}
+            <QuickActions
+              onLogTrade={() => router.push('/(tabs)/log')}
+              onHistory={() => router.push('/(tabs)/history')}
+              onRules={() => router.push('/screens/DisciplineTrendScreen')}
+            />
+
+            {/* ── Hero Stats ────────────────────────────────────────── */}
+            <View style={styles.heroGrid}>
+              <View style={styles.heroRow}>
+                <HeroStat
+                  icon="layers"
+                  label="TOTAL TRADES"
+                  value={trades.length}
+                  color={colors.blue}
+                  sub={`${closedCount} closed`}
+                  empty={!hasTrades}
+                />
+                <View style={{ width: spacing.sm }} />
+                <HeroStat
+                  icon="analytics"
+                  label="WIN RATE"
+                  value={`${stats.winRate}%`}
+                  color={winRateColor}
+                  sub={`${stats.wins}W / ${stats.losses}L`}
+                  empty={closedCount === 0}
+                />
+              </View>
+              <View style={styles.heroRow}>
+                <HeroStat
+                  icon="cash"
+                  label="TOTAL P&L"
+                  value={fmtPnl(stats.totalPnl, true)}
+                  color={pnlColor}
+                  sub={closedCount === 0 ? undefined : `ROI: ${roiStr}`}
+                  empty={closedCount === 0}
+                />
+                <View style={{ width: spacing.sm }} />
+                <View style={heroStyles.card}>
+                  <View style={heroStyles.topRow}>
+                    <View style={[heroStyles.iconBg, { backgroundColor: discColor + '18' }]}>
+                      <Ionicons name="shield-checkmark" size={16} color={discColor} />
+                    </View>
+                    <Text style={heroStyles.label}>DISCIPLINE</Text>
+                  </View>
+                  {hasTrades ? (
+                    <DisciplineProgress score={stats.avgDiscipline} color={discColor} />
+                  ) : (
+                    <Text style={[heroStyles.value, { color: colors.muted }]}>—</Text>
+                  )}
+                </View>
+              </View>
+            </View>
+
+            {/* ── Period Summary ────────────────────────────────────── */}
+            <PeriodSummary
+              weekPnl={stats.thisWeekPnl}
+              weekTrades={stats.thisWeekTrades}
+              weekWinRate={stats.thisWeekWinRate}
+              monthPnl={stats.thisMonthPnl}
+              monthTrades={stats.thisMonthTrades}
+              monthWinRate={stats.thisMonthWinRate}
+            />
+
+            {/* ── P&L Chart ─────────────────────────────────────────── */}
+            <PnlChart trades={trades} />
+
+            {/* ── Streak Tracker ────────────────────────────────────── */}
+            {hasTrades && (
+              <StreakTracker
+                maxWin={stats.maxWin}
+                maxLoss={stats.maxLoss}
+                curWin={stats.curWin}
+              />
+            )}
+
+            {/* ── Best / Worst Trades ──────────────────────────────── */}
+            <BestWorstTrades
+              best={stats.bestTrade}
+              worst={stats.worstTrade}
+              onPress={navigateToTrade}
+            />
+
+            {/* ── Session Breakdown ────────────────────────────────── */}
+            <SessionBreakdown trades={trades} />
+
+            {/* ── Rule Violation Patterns ──────────────────────────── */}
+            <ViolationWidget
+              violations={violations}
+              onPress={() => router.push('/screens/DisciplineTrendScreen')}
+            />
+
+            {/* ── Recent Trades ────────────────────────────────────── */}
+            <SectionDivider label="RECENT TRADES" />
+
+            {recent.length === 0 ? (
+              <View style={styles.emptyBlock}>
+                <View style={styles.emptyIconBg}>
+                  <Ionicons name="document-text-outline" size={28} color={colors.muted} />
+                </View>
+                <Text style={styles.emptyTitle}>No trades yet</Text>
+                <Text style={styles.emptyText}>
+                  Your trading journey starts with a single entry. Log your first trade to unlock insights.
+                </Text>
+                <TouchableOpacity
+                  onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); router.push('/(tabs)/log'); }}
+                  style={styles.emptyCta}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="add" size={14} color={colors.green} />
+                  <Text style={styles.emptyCtaText}>Log First Trade</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <>
+                {recent.map((t) => (
+                  <TradeCard
+                    key={t.id}
+                    trade={t}
+                    onPress={() => { Haptics.selectionAsync(); navigateToTrade(t.id); }}
+                  />
+                ))}
+                {trades.length > 5 && (
+                  <TouchableOpacity
+                    onPress={() => { Haptics.selectionAsync(); router.push('/(tabs)/history'); }}
+                    style={styles.viewAllBtn}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.viewAllText}>View all {trades.length} trades</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.muted} />
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </ScrollView>
+
+      <Toast message={toastMsg} visible={toastVisible} />
+    </SafeAreaView>
+  );
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+const styles = StyleSheet.create({
+  safe:    { flex: 1, backgroundColor: colors.bg },
+  scroll:  { flex: 1 },
+  content: { padding: spacing.lg, paddingBottom: 120 },
+
+  // Header
+  header:          { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing.md },
+  headerLeft:      { flex: 1 },
+  headerBadge:     { backgroundColor: colors.green + '22', borderWidth: 1, borderColor: colors.green + '55', borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 3, alignSelf: 'flex-start', marginBottom: spacing.sm },
+  headerBadgeText: { fontFamily: font.mono, fontSize: 8, color: colors.green, letterSpacing: 1.5 },
+  greeting:        { fontFamily: font.mono, fontSize: 11, color: colors.muted, marginBottom: 4 },
+  headerTitle:     { fontSize: 26, fontWeight: '800', color: colors.text, letterSpacing: 0.5 },
+  headerRight:     { alignItems: 'center' },
+  todayBadge:      { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, alignItems: 'center' },
+  todayNum:        { fontFamily: font.mono, fontSize: 22, fontWeight: '800', color: colors.blue },
+  todayLabel:      { fontFamily: font.mono, fontSize: 8, color: colors.muted, letterSpacing: 1, marginTop: 2 },
+
+  // Export
+  exportBtn:     { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.blue + '11', borderWidth: 0.5, borderColor: colors.blue + '44', borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.sm },
+  exportBtnText: { fontFamily: font.mono, fontSize: 12, color: colors.blue, fontWeight: '700', flex: 1 },
+  exportCount:   { fontFamily: font.mono, fontSize: 10, color: colors.muted },
+
+  // Hero
+  heroGrid: { marginBottom: spacing.md },
+  heroRow:  { flexDirection: 'row', marginBottom: spacing.sm },
+
+  // Empty
+  emptyBlock:   { backgroundColor: colors.surface, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.xl, alignItems: 'center' },
+  emptyIconBg:  { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.md },
+  emptyTitle:   { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 6 },
+  emptyText:    { fontFamily: font.mono, fontSize: 11, color: colors.muted, textAlign: 'center', lineHeight: 18, marginBottom: spacing.md },
+  emptyCta:     { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.green + '15', borderWidth: 0.5, borderColor: colors.green + '55', borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 8 },
+  emptyCtaText: { fontFamily: font.mono, fontSize: 11, color: colors.green, fontWeight: '700' },
+
+  // View all
+  viewAllBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: spacing.md, marginTop: spacing.xs },
+  viewAllText: { fontFamily: font.mono, fontSize: 11, color: colors.muted, fontWeight: '600' },
+
+  // Skeleton
+  loadingContainer: { padding: spacing.xs },
+  skeletonHeader:   { height: 80, backgroundColor: colors.surface, borderRadius: radius.lg, marginBottom: spacing.sm, opacity: 0.6 },
+  skeletonRow:      { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
+  skeletonCard:     { flex: 1, height: 120, backgroundColor: colors.surface, borderRadius: radius.lg, opacity: 0.6 },
+  skeletonFull:     { height: 160, backgroundColor: colors.surface, borderRadius: radius.lg, marginBottom: spacing.sm, opacity: 0.6 },
+});
+
+// ── Equity Styles ─────────────────────────────────────────────────────────────
+const equityStyles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 0.5,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  left: { flex: 1 },
+  label: {
+    fontFamily: font.mono,
+    fontSize: 8,
+    color: colors.muted,
+    letterSpacing: 1.5,
+    marginBottom: 4,
+  },
+  equityValue: {
+    fontFamily: font.mono,
+    fontSize: 22,
+    fontWeight: '800',
+    color: colors.text,
+  },
+  right: { alignItems: 'flex-end', gap: 4 },
+  pnlBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+    borderWidth: 0.5,
+  },
+  pnlText: {
+    fontFamily: font.mono,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  startSub: {
+    fontFamily: font.mono,
+    fontSize: 9,
+    color: colors.muted,
+  },
+});

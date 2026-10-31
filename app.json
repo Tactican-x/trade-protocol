@@ -1,29 +1,46 @@
 {
   "expo": {
-    "name": "TradeProtocol",
-    "slug": "TradeProtocol",
+    "name": "Trade Protocol",
+    "slug": "trade-protocol",
     "version": "1.0.0",
     "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "tradeprotocol",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
-    "ios": {
-      "supportsTablet": true
+      "backgroundColor": "#0b0b14"
     },
     "android": {
+      "package": "com.tradeprotocol.app",
+      "versionCode": 1,
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true
+        "backgroundColor": "#0b0b14"
+      }
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
+    "plugins": [
+      "expo-router",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#0b0b14",
+          "sounds": []
+        }
+      ],
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f85d4b86-c287-42ca-bbee-26934b630d03"
+      }
     }
   }
 }

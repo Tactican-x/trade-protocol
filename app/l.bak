@@ -1,0 +1,126 @@
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar } from 'react-native';
+import { Stack, useRouter } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { useFonts, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
+import { AppProvider } from './context/AppContext';
+import { colors, font, radius } from './theme';
+// PIN lock still disabled
+// import AppLockGate from './components/AppLockGate';
+
+// ── Global Error Boundary (Crash Protection) ──────────────────────────────────
+export function ErrorBoundary({ error, retry }: { error: Error; retry: () => void }) {
+  return (
+    <View style={eb.container}>
+      <View style={eb.iconBg}>
+        <Ionicons name="warning" size={36} color={colors.red} />
+      </View>
+      <Text style={eb.title}>Something went wrong</Text>
+      <Text style={eb.sub}>Your data is safe. Reload the app to continue.</Text>
+      <Text style={eb.err} numberOfLines={4}>{error?.message}</Text>
+      <TouchableOpacity style={eb.btn} onPress={retry} activeOpacity={0.85}>
+        <Ionicons name="refresh" size={16} color={colors.bg} />
+        <Text style={eb.btnText}>Reload App</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const eb = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  iconBg: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.red + '18', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  title: { color: colors.text, fontSize: 20, fontWeight: '800', marginBottom: 8 },
+  sub: { color: colors.muted, fontFamily: font.mono, fontSize: 12, textAlign: 'center', lineHeight: 18, marginBottom: 14 },
+  err: { width: '100%', color: colors.red, backgroundColor: colors.red + '12', borderRadius: radius.md, padding: 10, fontFamily: font.mono, fontSize: 10, marginBottom: 18, textAlign: 'center' },
+  btn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.green, borderRadius: radius.lg, paddingHorizontal: 18, paddingVertical: 12 },
+  btnText: { color: colors.bg, fontWeight: '800', fontSize: 14 },
+});
+
+// ── Root Layout ───────────────────────────────────────────────────────────────
+export default function RootLayout() {
+  const router = useRouter();
+  const [ready, setReady] = useState(false);
+  const [fontsLoaded] = useFonts({ SpaceGrotesk_700Bold });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        // Temporary: clear forgotten PIN (remove this line once you set a new PIN)
+        await AsyncStorage.removeItem('tp_pin_v1');
+
+        const done = await AsyncStorage.getItem('tp_onboarding_done');
+        setTimeout(() => {
+          if (done !== 'true') {
+            router.replace('/screens/OnboardingScreen');
+          }
+          setReady(true);
+        }, 0);
+      } catch {
+        setReady(true);
+      }
+    })();
+  }, []);
+
+  const appReady = ready && fontsLoaded;
+
+  return (
+    <SafeAreaProvider>
+      <AppProvider>
+        <StatusBar barStyle="light-content" backgroundColor={colors.bg} translucent={false} />
+
+        <Stack
+          screenOptions={{
+            // ✅ Restore top nav + back button on stacked screens
+            headerShown: true,
+            headerStyle: {
+              backgroundColor: colors.bg,
+            },
+            headerTintColor: colors.text,
+            headerTitleStyle: {
+              fontFamily: font.mono,
+              fontSize: 14,
+              fontWeight: '600',
+              color: colors.text,
+            },
+            headerShadowVisible: false,
+            headerBackTitleVisible: false,
+            contentStyle: { backgroundColor: colors.bg },
+          }}
+        >
+          {/* Tabs + onboarding: no header */}
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen
+            name="screens/OnboardingScreen"
+            options={{ headerShown: false, animation: 'fade' }}
+          />
+
+          {/* Secondary screens: keep header + back link */}
+          <Stack.Screen name="screens/TradeDetailScreen" options={{ title: 'Trade Detail' }} />
+          <Stack.Screen name="screens/EditTradeScreen" options={{ title: 'Edit Trade' }} />
+          <Stack.Screen name="screens/DisciplineTrendScreen" options={{ title: 'Discipline Trend' }} />
+          <Stack.Screen name="screens/AnalyticsScreen" options={{ title: 'Analytics' }} />
+          <Stack.Screen name="screens/MonthlyArchiveScreen" options={{ title: 'Monthly Archive' }} />
+          <Stack.Screen name="screens/AddImageScreen" options={{ title: 'Add Image' }} />
+          <Stack.Screen name="screens/GalleryScreen" options={{ title: 'Gallery' }} />
+          <Stack.Screen name="screens/GalleryDetailScreen" options={{ title: 'Image' }} />
+          <Stack.Screen name="screens/GroupDetailScreen" options={{ title: 'Group' }} />
+          <Stack.Screen name="screens/MentalLogScreen" options={{ title: 'Mental Log' }} />
+          <Stack.Screen name="screens/ImportScreen" options={{ title: 'Import' }} />
+          <Stack.Screen name="screens/SettingsScreen" options={{ title: 'Settings' }} />
+          <Stack.Screen name="screens/RiskCalculatorScreen" options={{ title: 'Risk Calculator' }} />
+          <Stack.Screen name="screens/GoalsScreen" options={{ title: 'Goals' }} />
+        </Stack>
+
+        {!appReady && (
+          <View style={StyleSheet.absoluteFillObject}>
+            <View style={{ flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' }}>
+              <ActivityIndicator color={colors.green} />
+            </View>
+          </View>
+        )}
+      </AppProvider>
+    </SafeAreaProvider>
+  );
+}
